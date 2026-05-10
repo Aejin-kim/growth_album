@@ -5,8 +5,15 @@ import { GoogleOAuthProvider, useGoogleLogin } from '@react-oauth/google';
 import { mockPhotos } from './data/mockData';
 import { 
   createPickerSession, fetchPickerItems, checkSessionStatus, getSavedPhotos, 
-  savePhotos, deletePhoto, updatePhotoDetails, renameTheme, resetPhotos, setPhotoAsCover 
+  savePhotos, deletePhoto, updatePhotoDetails, renameTheme, resetPhotos, setPhotoAsCover, finalizePhotosSync
 } from './services/googlePhotos';
+
+const LazyImagePlaceholder = () => (
+  <div className="w-full h-full bg-pastel-pink/10 flex flex-col items-center justify-center text-pastel-accent p-4 text-center">
+    <Sparkles className="w-6 h-6 mb-2 opacity-50" />
+    <p className="text-xs font-bold font-sans">인증 시<br/>보여짐</p>
+  </div>
+);
 
 const START_YEAR = 2012;
 const CURRENT_YEAR = new Date().getFullYear();
@@ -174,14 +181,40 @@ function AlbumContent() {
     }
   };
 
-  const getProxiedUrl = (url) => {
-    if (!url) return '';
-    if (url.startsWith('http://localhost:3001/images/')) return url;
+  const getImageUrl = (photo) => {
+    if (!photo) return '';
+    if (photo.is_synced === false) return null; // Placeholder 트리거
+    
+    const proxyBase = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:3001/api';
+    const url = photo.url;
+    // 과거 로컬 저장 데이터 호환처리
+    if (url.startsWith('http://localhost:3001/images/') || url.includes('/images/')) return url;
+    
     const isGooglePhoto = url.includes('googleusercontent.com');
     if (isGooglePhoto && accessToken) {
-      return `http://localhost:3001/api/image-proxy?url=${encodeURIComponent(url)}&token=${accessToken}`;
+      return `${proxyBase}/image-proxy?url=${encodeURIComponent(url)}&token=${accessToken}`;
     }
     return url;
+  };
+
+  const handleFinalizeSync = async () => {
+    if (!window.confirm('현재 임시 모드인 사진들을 리얼망(네트워크)을 통해 불러오시겠습니까? (최종 권한 인가)')) return;
+    try {
+      setLoading(true);
+      const unsyncedIds = photos.filter(p => p.is_synced === false).map(p => p.id);
+      if (unsyncedIds.length === 0) {
+        alert('모든 사진이 이미 로드되어 있습니다.');
+        return;
+      }
+      await finalizePhotosSync(unsyncedIds);
+      const updated = await getSavedPhotos();
+      setPhotos(updated);
+      alert(`${unsyncedIds.length}개의 사진 인증을 완료했습니다!`);
+    } catch (err) {
+      alert('처리 중 오류가 발생했습니다.');
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleRenameTheme = async (e, oldTheme) => {
@@ -208,10 +241,12 @@ function AlbumContent() {
     e.stopPropagation();
     try {
       setLoading(true);
-      await setPhotoAsCover(id);
       const targetPhoto = photos.find(p => p.id === id);
       const targetYear = targetPhoto.date ? targetPhoto.date.split('-')[0] : 'Etc';
       const targetTheme = targetPhoto.theme || '기타 추억';
+      
+      await setPhotoAsCover(id, targetYear, targetTheme);
+      
       setPhotos(prev => prev.map(p => {
         const pYear = p.date ? p.date.split('-')[0] : 'Etc';
         const pTheme = p.theme || '기타 추억';
@@ -309,20 +344,32 @@ function AlbumContent() {
               <h2 className="text-5xl md:text-7xl font-serif italic text-gray-800 leading-tight">{selectedYear} <span className="not-italic font-sans text-gray-400">Growth Story</span></h2>
               {selectedTheme && <button onClick={() => setSelectedTheme(null)} className="mt-4 flex items-center gap-2 text-pastel-accent hover:underline font-bold"><ArrowLeft className="w-4 h-4" /> <span>목록으로 돌아가기</span></button>}
             </motion.div>
-            <button
-              onClick={() => {
-                if (!accessToken) login();
-                else if (!pickerSessionId) handleOpenPicker();
-                else handleSyncPhotos();
-              }}
-              disabled={loading}
-              className={`flex items-center justify-center gap-3 px-8 py-4 rounded-full font-bold shadow-lg transition-all w-full md:w-auto ${
-                pickerSessionId ? 'bg-green-500 text-white animate-pulse' : 'bg-pastel-accent text-white hover:border-b-4 hover:shadow-pastel-accent/30 hover:-translate-y-1'
-              } active:scale-95`}
-            >
-              {loading ? <RefreshCcw className="w-5 h-5 animate-spin" /> : pickerSessionId ? <Sparkles className="w-5 h-5" /> : <Camera className="w-5 h-5" />}
-              <span>{!accessToken ? '구글 Photos 연동' : (!pickerSessionId ? '구글 포토에서 추억 선택' : '선택 완료 및 가져오기')}</span>
-            </button>
+            <div className="flex gap-4 w-full md:w-auto">
+              {photos.some(p => p.is_synced === false) && (
+                <button
+                  onClick={handleFinalizeSync}
+                  disabled={loading}
+                  className="flex items-center justify-center gap-2 px-6 py-4 rounded-full font-bold shadow-lg transition-all border-2 border-pastel-accent bg-white text-pastel-accent hover:bg-pastel-pink/10"
+                >
+                  <RefreshCcw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
+                  <span>네트워크 노출 (2단계 완료)</span>
+                </button>
+              )}
+              <button
+                onClick={() => {
+                  if (!accessToken) login();
+                  else if (!pickerSessionId) handleOpenPicker();
+                  else handleSyncPhotos();
+                }}
+                disabled={loading}
+                className={`flex items-center justify-center gap-3 px-8 py-4 rounded-full font-bold shadow-lg transition-all ${
+                  pickerSessionId ? 'bg-green-500 text-white animate-pulse' : 'bg-pastel-accent text-white hover:border-b-4 hover:shadow-pastel-accent/30 hover:-translate-y-1'
+                } active:scale-95`}
+              >
+                {loading ? <RefreshCcw className="w-5 h-5 animate-spin" /> : pickerSessionId ? <Sparkles className="w-5 h-5" /> : <Camera className="w-5 h-5" />}
+                <span>{!accessToken ? '구글 Photos 연동' : (!pickerSessionId ? '구글 포토에서 추억 골라오기' : '선택 완료 (1단계 메타저장)')}</span>
+              </button>
+            </div>
           </header>
 
           {!selectedTheme ? (
@@ -335,7 +382,11 @@ function AlbumContent() {
                     <motion.div key={theme} whileHover={{ scale: 1.02 }} className="group relative cursor-pointer bg-white rounded-[2rem] p-6 shadow-sm hover:shadow-xl border border-[#F0EBE3]" onClick={() => setSelectedTheme(theme)}>
                       <button onClick={(e) => handleRenameTheme(e, theme)} className="absolute top-8 right-8 z-20 p-2 bg-white/80 backdrop-blur-md rounded-full text-gray-400 hover:text-pastel-pink opacity-0 group-hover:opacity-100 transition-all"><Edit2 className="w-3 h-3" /></button>
                       <div className="relative aspect-[4/3] rounded-2xl overflow-hidden mb-6 bg-warm-cream">
-                        {coverPhoto && <img src={getProxiedUrl(coverPhoto.url)} referrerPolicy="no-referrer" className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-700" />}
+                        {coverPhoto && (
+                          getImageUrl(coverPhoto) 
+                            ? <img src={getImageUrl(coverPhoto)} referrerPolicy="no-referrer" className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-700" />
+                            : <LazyImagePlaceholder />
+                        )}
                         <div className="absolute top-4 right-4 bg-white/90 rounded-full px-3 py-1 text-[10px] font-bold text-gray-600">{themePhotos.length} Photos</div>
                       </div>
                       <h3 className="text-xl font-bold text-gray-800 mb-1">{theme}</h3><p className="text-gray-400 text-xs font-mono uppercase">Memory Group</p>
@@ -352,7 +403,10 @@ function AlbumContent() {
                     <div className="relative h-full bg-white rounded-[2rem] overflow-hidden shadow-sm hover:shadow-2xl transition-all border border-[#F0EBE3] group-hover:-translate-y-2">
                       <button onClick={(e) => handleDelete(e, photo.id)} className="absolute top-4 right-4 z-20 p-2 bg-white/80 rounded-full text-gray-400 hover:text-red-500 opacity-0 group-hover:opacity-100"><X className="w-4 h-4" /></button>
                       <button onClick={(e) => handleSetCover(e, photo.id)} className={`absolute top-4 left-4 z-20 p-2 rounded-full transition-all shadow-md opacity-0 group-hover:opacity-100 ${photo.isCover ? 'bg-yellow-400 text-white opacity-100' : 'bg-white/80 text-gray-400 hover:text-yellow-500'}`} title="대표 지정"><Star className={`w-4 h-4 ${photo.isCover ? 'fill-current' : ''}`} /></button>
-                      <img src={getProxiedUrl(photo.url)} referrerPolicy="no-referrer" className="w-full aspect-[4/5] object-cover transition-transform group-hover:scale-110" />
+                      {getImageUrl(photo)
+                        ? <img src={getImageUrl(photo)} referrerPolicy="no-referrer" className="w-full aspect-[4/5] object-cover transition-transform group-hover:scale-110" />
+                        : <div className="w-full aspect-[4/5]"><LazyImagePlaceholder /></div>
+                      }
                       <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-end p-6"><div className="text-white"><p className="text-sm font-medium line-clamp-2">{photo.comment || photo.description}</p><p className="text-[10px] opacity-60 mt-1 uppercase tracking-widest">{photo.date}</p></div></div>
                     </div>
                   </motion.div>
@@ -367,7 +421,12 @@ function AlbumContent() {
         {selectedPhoto && (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/90 backdrop-blur-sm" onClick={() => setSelectedPhoto(null)}>
             <motion.div initial={{ scale: 0.9 }} animate={{ scale: 1 }} className="relative max-w-6xl w-full bg-white rounded-[2rem] overflow-hidden flex flex-col md:flex-row shadow-2xl" onClick={(e) => e.stopPropagation()}>
-              <div className="flex-1 bg-black flex items-center justify-center p-4"><img src={getProxiedUrl(selectedPhoto.url)} referrerPolicy="no-referrer" className="max-w-full max-h-[70vh] object-contain rounded-xl" /></div>
+              <div className="flex-1 bg-black flex items-center justify-center p-4">
+                {getImageUrl(selectedPhoto)
+                  ? <img src={getImageUrl(selectedPhoto)} referrerPolicy="no-referrer" className="max-w-full max-h-[70vh] object-contain rounded-xl" />
+                  : <div className="max-w-full"><LazyImagePlaceholder /></div>
+                }
+              </div>
               <div className="w-full md:w-96 p-8 flex flex-col bg-white overflow-y-auto">
                 <div className="flex justify-between mb-8"><div><span className="text-[10px] font-bold text-pastel-accent uppercase tracking-widest block mb-1">Photo Details</span><h3 className="text-2xl font-serif italic text-gray-800">{selectedPhoto.date}</h3></div><button onClick={() => setSelectedPhoto(null)}><X className="w-6 h-6 text-gray-300 hover:text-pastel-accent" /></button></div>
                 <div className="space-y-6 flex-1">

@@ -1,14 +1,15 @@
 import axios from 'axios';
+import { supabase } from './db';
 
-// 브라우저에서 직접 구글로 쏘는 대신, 우리가 만든 로컬 프록시 서버(3001번)로 요청을 보냅니다.
-const LOCAL_PROXY_BASE = 'http://127.0.0.1:3001/api';
+// 환경 변수 VITE_API_BASE_URL이 배포 환경(Vercel)에 설정되어 있다면 그 주소를 활용하고, 없다면 로컬 개발 주소를 사용합니다.
+const PROXY_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:3001/api';
 
 /**
  * Creates a new Picker Session via Proxy.
  */
 export const createPickerSession = async (accessToken) => {
   try {
-    const response = await axios.post(`${LOCAL_PROXY_BASE}/create-session`, {}, {
+    const response = await axios.post(`${PROXY_BASE}/create-session`, {}, {
       headers: {
         Authorization: `Bearer ${accessToken}`,
       },
@@ -25,7 +26,7 @@ export const createPickerSession = async (accessToken) => {
  */
 export const checkSessionStatus = async (accessToken, sessionId) => {
   try {
-    const response = await axios.get(`${LOCAL_PROXY_BASE}/session-status/${sessionId}`, {
+    const response = await axios.get(`${PROXY_BASE}/session-status/${sessionId}`, {
       headers: {
         Authorization: `Bearer ${accessToken}`,
       },
@@ -42,7 +43,7 @@ export const checkSessionStatus = async (accessToken, sessionId) => {
  */
 export const fetchPickerItems = async (accessToken, sessionId) => {
   try {
-    const response = await axios.get(`${LOCAL_PROXY_BASE}/fetch-items/${sessionId}`, {
+    const response = await axios.get(`${PROXY_BASE}/fetch-items/${sessionId}`, {
       headers: {
         Authorization: `Bearer ${accessToken}`,
       },
@@ -67,14 +68,14 @@ export const fetchPickerItems = async (accessToken, sessionId) => {
         return null;
       }
 
-      // 구글 이미지 보안 차단을 우회하기 위해 로컬 이미지 프록시(3001) 사용
+      // 구글 이미지 보안 차단을 우회하기 위해 프록시 서버의 /image-proxy 사용
       // [중요] Picker API는 이미지 접근 시에도 인증 토큰이 필요합니다.
       const originalUrl = baseUrl + '=w1200';
-      const localProxyUrl = `${LOCAL_PROXY_BASE}/image-proxy?url=${encodeURIComponent(originalUrl)}&token=${accessToken}`;
+      const proxyUrl = `${PROXY_BASE}/image-proxy?url=${encodeURIComponent(originalUrl)}&token=${accessToken}`;
       
       return {
         id: item.id || `google-${Math.random().toString(36).substr(2, 9)}`,
-        url: localProxyUrl,
+        url: proxyUrl,
         date: (item.mediaItemMetadata?.creationTime || new Date().toISOString()).split('T')[0],
         description: item.mediaItemMetadata?.video?.filename || 'Google Photo',
         isMilestone: false,
@@ -87,12 +88,13 @@ export const fetchPickerItems = async (accessToken, sessionId) => {
 };
 
 /**
- * DB: Fetch all saved photos from server.
+ * DB: Fetch all saved photos from Supabase.
  */
 export const getSavedPhotos = async () => {
   try {
-    const response = await axios.get(`${LOCAL_PROXY_BASE}/saved-photos`);
-    return response.data;
+    const { data, error } = await supabase.from('photos').select('*').order('created_at', { ascending: false });
+    if (error) throw error;
+    return data || [];
   } catch (error) {
     console.error('Error fetching saved photos:', error);
     return [];
@@ -100,25 +102,39 @@ export const getSavedPhotos = async () => {
 };
 
 /**
- * DB: Save new photos to server.
+ * DB: Save new photos to Supabase (Step 1: is_synced false by default).
  */
 export const savePhotos = async (photos) => {
   try {
-    const response = await axios.post(`${LOCAL_PROXY_BASE}/save-photos`, photos);
-    return response.data;
+    const { data, error } = await supabase.from('photos').upsert(
+      photos.map(p => ({
+        id: p.id,
+        url: p.url,
+        original_google_url: p.originalGoogleUrl || p.url,
+        mime_type: p.mimeType || 'image/jpeg',
+        date: p.date,
+        theme: p.theme,
+        comment: p.comment,
+        description: p.description,
+        is_synced: false
+      }))
+    );
+    if (error) throw error;
+    return data;
   } catch (error) {
-    console.error('Error saving photos:', error);
+    console.error('Error saving photos to Supabase:', error);
     throw error;
   }
 };
 
 /**
- * DB: Delete a photo from server.
+ * DB: Delete a photo from Supabase.
  */
 export const deletePhoto = async (id) => {
   try {
-    const response = await axios.delete(`${LOCAL_PROXY_BASE}/delete-photo/${id}`);
-    return response.data;
+    const { error } = await supabase.from('photos').delete().eq('id', id);
+    if (error) throw error;
+    return true;
   } catch (error) {
     console.error('Error deleting photo:', error);
     throw error;
@@ -126,12 +142,13 @@ export const deletePhoto = async (id) => {
 };
 
 /**
- * DB: Update photo details (theme and comment)
+ * DB: Update photo details (theme and comment) in Supabase.
  */
 export const updatePhotoDetails = async (id, theme, comment) => {
   try {
-    const response = await axios.post(`${LOCAL_PROXY_BASE}/update-photo-details`, { id, theme, comment });
-    return response.data;
+    const { error } = await supabase.from('photos').update({ theme, comment }).eq('id', id);
+    if (error) throw error;
+    return true;
   } catch (error) {
     console.error('Error updating photo details:', error);
     throw error;
@@ -143,8 +160,9 @@ export const updatePhotoDetails = async (id, theme, comment) => {
  */
 export const bulkUpdateTheme = async (ids, theme) => {
   try {
-    const response = await axios.post(`${LOCAL_PROXY_BASE}/bulk-update-theme`, { ids, theme });
-    return response.data;
+    const { error } = await supabase.from('photos').update({ theme }).in('id', ids);
+    if (error) throw error;
+    return true;
   } catch (error) {
     console.error('Error bulk updating theme:', error);
     throw error;
@@ -156,8 +174,14 @@ export const bulkUpdateTheme = async (ids, theme) => {
  */
 export const renameTheme = async (year, oldTheme, newTheme) => {
   try {
-    const response = await axios.post(`${LOCAL_PROXY_BASE}/rename-theme`, { year, oldTheme, newTheme });
-    return response.data;
+    // Supabase에서는 조건이 복잡해질 수 있으므로, 프론트에서 date like/startsWith 조건으로 일괄 업뎃이 필요함.
+    const { error } = await supabase
+      .from('photos')
+      .update({ theme: newTheme })
+      .like('date', `${year}-%`)
+      .eq('theme', oldTheme);
+    if (error) throw error;
+    return true;
   } catch (error) {
     console.error('Error renaming theme:', error);
     throw error;
@@ -167,10 +191,14 @@ export const renameTheme = async (year, oldTheme, newTheme) => {
 /**
  * DB: Set a photo as the cover for its theme group
  */
-export const setPhotoAsCover = async (id) => {
+export const setPhotoAsCover = async (id, year, theme) => {
   try {
-    const response = await axios.post(`${LOCAL_PROXY_BASE}/set-cover`, { id });
-    return response.data;
+    // 1. 해당 테마의 모든 사진 is_cover = false 처리
+    await supabase.from('photos').update({ is_cover: false }).like('date', `${year}-%`).eq('theme', theme);
+    // 2. 타겟 사진 is_cover = true
+    const { error } = await supabase.from('photos').update({ is_cover: true }).eq('id', id);
+    if (error) throw error;
+    return true;
   } catch (error) {
     console.error('Error setting cover:', error);
     throw error;
@@ -182,10 +210,25 @@ export const setPhotoAsCover = async (id) => {
  */
 export const resetPhotos = async () => {
   try {
-    const response = await axios.post(`${LOCAL_PROXY_BASE}/reset-photos`);
-    return response.data;
+    const { error } = await supabase.from('photos').delete().neq('id', 'dummy'); // 모두 삭제
+    if (error) throw error;
+    return true;
   } catch (error) {
     console.error('Error resetting data:', error);
+    throw error;
+  }
+};
+
+/**
+ * DB: (Step 2) Finalize Auth to mark photos as synced
+ */
+export const finalizePhotosSync = async (ids) => {
+  try {
+    const { error } = await supabase.from('photos').update({ is_synced: true }).in('id', ids);
+    if (error) throw error;
+    return true;
+  } catch (error) {
+    console.error('Error finalizing sync:', error);
     throw error;
   }
 };

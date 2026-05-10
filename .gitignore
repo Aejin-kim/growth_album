@@ -12,6 +12,7 @@ dist
 dist-ssr
 *.local
 data/images
+docs/개인정보.md
 
 # Editor directories and files
 .vscode/*
