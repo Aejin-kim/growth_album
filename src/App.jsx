@@ -187,8 +187,7 @@ function AlbumContent() {
     
     const proxyBase = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:3001/api';
     const url = photo.url;
-    // 과거 로컬 저장 데이터 호환처리
-    if (url.startsWith('http://localhost:3001/images/') || url.includes('/images/')) return url;
+    // 과거 로컬 저장 데이터 호환처리 제거됨
     
     const isGooglePhoto = url.includes('googleusercontent.com');
     if (isGooglePhoto && accessToken) {
